@@ -248,6 +248,12 @@ def outlier_flags(values: list[float], threshold: float) -> list[bool]:
     return [abs(v - middle) > threshold * sigma for v in values]
 
 
+def delete_command(path: str) -> str:
+    if os.name == "nt":
+        return f'del "{path}"' if " " in path else f"del {path}"
+    return f"rm {shlex.quote(path)}"
+
+
 def print_table(rows: list[list[str]], headers: list[str], separator: str | None) -> None:
     if separator is not None:
         for row in [headers] + rows:
@@ -376,7 +382,7 @@ def main(argv: list[str] | None = None) -> int:
         if not args.no_rm_list:
             print(f"\n# sorted by {args.sort}, highest first - review and run manually")
             for _, _, path, _ in measurements:
-                print(f"rm {shlex.quote(path)}")
+                print(delete_command(path))
 
     return 1 if failures else 0
 

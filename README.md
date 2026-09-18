@@ -99,8 +99,8 @@ fitsmedian /path/to/directory -a 20 -s TL
 | `-n, --no-rm-list` | Do not print the `rm` command list. |
 
 Results are sorted from the highest value to the lowest, and a matching list of
-`rm <file>` commands is printed below the table so you can copy the lines for the frames
-you want to delete. The script never deletes anything itself.
+`rm <file>` commands (`del <file>` on Windows) is printed below the table so you can copy
+the lines for the frames you want to delete. The script never deletes anything itself.
 
 The last column, `SUM`, adds up the five region medians. In every column values that
 deviate more than the threshold from the column median (using the median absolute
