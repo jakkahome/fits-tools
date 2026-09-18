@@ -15,12 +15,18 @@ somewhere on your `PATH` and run them.
 
 ## Installation
 
+All three scripts start with a `#!/usr/bin/env python3` shebang, so once they are
+executable and on your `PATH` you can run them by name (`fitsmedian ...`) without
+prefixing `python`.
+
 ```sh
 chmod +x fitsparams fits2xisf fitsmedian
-ln -s "$PWD/fitsparams" /usr/local/bin/fitsparams
-ln -s "$PWD/fits2xisf" /usr/local/bin/fits2xisf
-ln -s "$PWD/fitsmedian" /usr/local/bin/fitsmedian
+for tool in fitsparams fits2xisf fitsmedian; do
+  ln -sf "$PWD/$tool" /usr/local/bin/$tool   # or /opt/homebrew/bin on Apple Silicon
+done
 ```
+
+On Windows, run them with `python fitsmedian ...` or create a `fitsmedian.bat` wrapper.
 
 ## `fitsparams`
 
