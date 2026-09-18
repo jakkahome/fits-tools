@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import math
 import os
+import shlex
 import statistics
 import struct
 import sys
@@ -241,6 +242,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-f", "--full-path", action="store_true", help="print full paths instead of names"
     )
+    parser.add_argument(
+        "-n",
+        "--no-rm-list",
+        action="store_true",
+        help="do not print the 'rm' command list",
+    )
     args = parser.parse_args(argv)
 
     if not 0 < args.area <= 100:
@@ -255,7 +262,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fitsmedian: no FITS/XISF files found in {args.path}", file=sys.stderr)
         return 1
 
-    rows: list[list[str]] = []
+    results: list[tuple[float, str, list[str]]] = []
     channels = 1
     failures = 0
     for path in files:
@@ -267,16 +274,24 @@ def main(argv: list[str] | None = None) -> int:
             continue
         channels = max(channels, len(medians))
         name = path if args.full_path else os.path.basename(path)
-        rows.append([name, f"{w}x{h}"] + [format_value(m) for m in medians])
+        row = [name, f"{w}x{h}"] + [format_value(m) for m in medians]
+        results.append((max(medians), path, row))
 
-    if rows:
+    results.sort(key=lambda item: item[0], reverse=True)
+
+    if results:
         names = CHANNEL_NAMES.get(channels, [str(i + 1) for i in range(channels)])
         headers = ["FILE", "REGION"] + [
             f"MEDIAN{'_' + n if n else ''}" for n in names
         ]
         width = len(headers)
-        rows = [row + ["-"] * (width - len(row)) for row in rows]
+        rows = [row + ["-"] * (width - len(row)) for _, _, row in results]
         print_table(rows, headers, "," if args.csv else None)
+
+        if not args.no_rm_list:
+            print("\n# highest first - review and run manually")
+            for _, path, _ in results:
+                print(f"rm {shlex.quote(path)}")
 
     return 1 if failures else 0
 
