@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Report the median pixel value of the central area of FITS/XISF images."""
+"""Report median pixel values of the centre and corner areas of FITS/XISF images."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ import xml.etree.ElementTree as ET
 
 FITS_EXT = {".fit", ".fits", ".fts"}
 XISF_EXT = {".xisf"}
-DEFAULT_AREA = 10.0
-CHANNEL_NAMES = {1: [""], 3: ["R", "G", "B"]}
+DEFAULT_AREA = 5.0
+REGIONS = ["CENTER", "TL", "TR", "BL", "BR"]
 
 FITS_CODES = {8: "B", 16: "h", 32: "i", 64: "q", -32: "f", -64: "d"}
 XISF_CODES = {
@@ -164,19 +164,29 @@ def open_xisf(path: str, fh) -> Image:
     )
 
 
-def center_medians(path: str, fraction: float) -> tuple[list[float], tuple[int, int]]:
+def region_medians(path: str, fraction: float) -> tuple[dict[str, float], tuple[int, int]]:
+    """Median of each sampled region, pooled over all channels."""
     opener = open_xisf if os.path.splitext(path)[1].lower() in XISF_EXT else open_fits
     with open(path, "rb") as fh:
         image = opener(path, fh)
         scale = math.sqrt(fraction)
         w = max(1, round(image.width * scale))
         h = max(1, round(image.height * scale))
-        x0 = (image.width - w) // 2
-        y0 = (image.height - h) // 2
-        medians = [
-            statistics.median(image.read_region(fh, c, x0, y0, w, h))
-            for c in range(image.channels)
-        ]
+        right = image.width - w
+        bottom = image.height - h
+        origins = {
+            "CENTER": (right // 2, bottom // 2),
+            "TL": (0, 0),
+            "TR": (right, 0),
+            "BL": (0, bottom),
+            "BR": (right, bottom),
+        }
+        medians = {}
+        for region, (x0, y0) in origins.items():
+            values: list[float] = []
+            for channel in range(image.channels):
+                values += image.read_region(fh, channel, x0, y0, w, h)
+            medians[region] = statistics.median(values)
     return medians, (w, h)
 
 
@@ -222,7 +232,7 @@ def print_table(rows: list[list[str]], headers: list[str], separator: str | None
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="fitsmedian",
-        description="Median pixel value of the central area of FITS/XISF images.",
+        description="Median pixel values of the centre and corner areas of FITS/XISF images.",
     )
     parser.add_argument("path", help="FITS/XISF file or directory containing them")
     parser.add_argument(
@@ -231,7 +241,14 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=DEFAULT_AREA,
         metavar="PERCENT",
-        help=f"percentage of the image area to measure (default: {DEFAULT_AREA:g})",
+        help=f"percentage of the image area per region (default: {DEFAULT_AREA:g})",
+    )
+    parser.add_argument(
+        "-s",
+        "--sort",
+        choices=REGIONS,
+        default="CENTER",
+        help="region used to sort the results (default: CENTER)",
     )
     parser.add_argument(
         "-r", "--recursive", action="store_true", help="search directories recursively"
@@ -263,33 +280,26 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     results: list[tuple[float, str, list[str]]] = []
-    channels = 1
     failures = 0
     for path in files:
         try:
-            medians, (w, h) = center_medians(path, args.area / 100.0)
+            medians, (w, h) = region_medians(path, args.area / 100.0)
         except (ImageError, OSError, struct.error) as exc:
             print(f"fitsmedian: {path}: {exc}", file=sys.stderr)
             failures += 1
             continue
-        channels = max(channels, len(medians))
         name = path if args.full_path else os.path.basename(path)
-        row = [name, f"{w}x{h}"] + [format_value(m) for m in medians]
-        results.append((max(medians), path, row))
+        row = [name, f"{w}x{h}"] + [format_value(medians[r]) for r in REGIONS]
+        results.append((medians[args.sort], path, row))
 
     results.sort(key=lambda item: item[0], reverse=True)
 
     if results:
-        names = CHANNEL_NAMES.get(channels, [str(i + 1) for i in range(channels)])
-        headers = ["FILE", "REGION"] + [
-            f"MEDIAN{'_' + n if n else ''}" for n in names
-        ]
-        width = len(headers)
-        rows = [row + ["-"] * (width - len(row)) for _, _, row in results]
-        print_table(rows, headers, "," if args.csv else None)
+        headers = ["FILE", "SIZE"] + REGIONS
+        print_table([row for _, _, row in results], headers, "," if args.csv else None)
 
         if not args.no_rm_list:
-            print("\n# highest first - review and run manually")
+            print(f"\n# sorted by {args.sort} median, highest first - review and run manually")
             for _, path, _ in results:
                 print(f"rm {shlex.quote(path)}")
 

@@ -10,7 +10,7 @@ somewhere on your `PATH` and run them.
 | --- | --- |
 | `fitsparams` | Prints selected FITS header keywords of FITS and XISF files as a table. |
 | `fits2xisf` | Converts FITS images to monolithic XISF files, preserving the header keywords. |
-| `fitsmedian` | Reports the median pixel value of the central area of FITS and XISF images. |
+| `fitsmedian` | Reports median pixel values of the centre and corner areas of FITS and XISF images. |
 | `files/` | Sample FITS and XISF frames used for testing (not tracked in git). |
 
 ## Installation
@@ -76,19 +76,20 @@ Details:
 
 ## `fitsmedian`
 
-Measures the median pixel value of a centred region covering 10 % of the image area
-(i.e. ~31.6 % of the width and height), which is handy for checking sky background or
-flat levels.
+Measures median pixel values in five regions — the centre and the four corners — each
+covering 5 % of the image area by default. Useful for checking sky background level,
+vignetting and gradients across a set of frames.
 
 ```sh
 fitsmedian /path/to/file.fit
 fitsmedian /path/to/directory
-fitsmedian /path/to/directory -a 25
+fitsmedian /path/to/directory -a 10 -s TL
 ```
 
 | Option | Description |
 | --- | --- |
-| `-a, --area PERCENT` | Percentage of the image area to measure (default: 10). |
+| `-a, --area PERCENT` | Percentage of the image area per region (default: 5). |
+| `-s, --sort REGION` | Region used for sorting: `CENTER`, `TL`, `TR`, `BL`, `BR` (default: `CENTER`). |
 | `-r, --recursive` | Search directories recursively. |
 | `-c, --csv` | Output comma-separated values instead of an aligned table. |
 | `-f, --full-path` | Print full paths instead of file names. |
@@ -98,6 +99,6 @@ Results are sorted from the highest median to the lowest, and a matching list of
 `rm <file>` commands is printed below the table so you can copy the lines for the frames
 you want to delete. The script never deletes anything itself.
 
-The `REGION` column shows the measured region in pixels. RGB images get one median per
-channel (`MEDIAN_R`, `MEDIAN_G`, `MEDIAN_B`). FITS values are scaled with `BZERO`/`BSCALE`;
-compressed XISF data blocks are not supported.
+The `SIZE` column shows the size of each sampled region in pixels. For colour images all
+channels are pooled into one median per region. FITS values are scaled with
+`BZERO`/`BSCALE`; compressed XISF data blocks are not supported.
