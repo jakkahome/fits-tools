@@ -91,7 +91,7 @@ fitsmedian /path/to/directory -a 20 -s TL
 | --- | --- |
 | `-a, --area PERCENT` | Total percentage of the image area to sample, split evenly between the five regions (default: 10). |
 | `-s, --sort REGION` | Column used for sorting: `CENTER`, `TL`, `TR`, `BL`, `BR`, `SUM` (default: `SUM`). |
-| `-t, --threshold SIGMA` | Outlier threshold in robust sigmas; `0` disables highlighting (default: 3). |
+| `-t, --threshold PERCENT` | Highlight values deviating more than this percentage from the column median; `0` disables highlighting (default: 15). |
 | `-m, --max-samples N` | Approximate pixels read per region; `0` reads every pixel (default: 100000). |
 | `-r, --recursive` | Search directories recursively. |
 | `-c, --csv` | Output comma-separated values instead of an aligned table. |
@@ -103,9 +103,8 @@ Results are sorted from the highest value to the lowest, and a matching list of
 the lines for the frames you want to delete. The script never deletes anything itself.
 
 The last column, `SUM`, adds up the five region medians. In every column values that
-deviate more than the threshold from the column median (using the median absolute
-deviation as a robust sigma) are marked with `*`, and shown in red on a terminal. CSV
-output is left unmarked.
+deviate more than 15 % from the column median are marked with `*`, and shown in red on a
+terminal. CSV output is left unmarked.
 
 The `SIZE` column shows the size of each sampled region in pixels, followed by `/N` when
 the region is subsampled for speed (one 2×2 block every `N` pixels, which keeps CFA/Bayer

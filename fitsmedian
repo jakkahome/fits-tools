@@ -16,10 +16,9 @@ FITS_EXT = {".fit", ".fits", ".fts"}
 XISF_EXT = {".xisf"}
 DEFAULT_AREA = 10.0
 DEFAULT_SAMPLES = 100_000
-DEFAULT_THRESHOLD = 3.0
+DEFAULT_THRESHOLD = 15.0
 REGIONS = ["CENTER", "TL", "TR", "BL", "BR"]
 COLUMNS = REGIONS + ["SUM"]
-MAD_TO_SIGMA = 1.4826
 HIGHLIGHT = "\033[1;31m"
 RESET = "\033[0m"
 
@@ -238,14 +237,14 @@ def format_value(value: float) -> str:
 
 
 def outlier_flags(values: list[float], threshold: float) -> list[bool]:
-    """Flag values further than `threshold` robust sigmas from the column median."""
+    """Flag values deviating more than `threshold` percent from the column median."""
     if len(values) < 3 or threshold <= 0:
         return [False] * len(values)
     middle = statistics.median(values)
-    sigma = MAD_TO_SIGMA * statistics.median([abs(v - middle) for v in values])
-    if sigma <= 0:
+    if middle == 0:
         return [False] * len(values)
-    return [abs(v - middle) > threshold * sigma for v in values]
+    limit = abs(middle) * threshold / 100.0
+    return [abs(v - middle) > limit for v in values]
 
 
 def delete_command(path: str) -> str:
@@ -300,9 +299,9 @@ def main(argv: list[str] | None = None) -> int:
         "--threshold",
         type=float,
         default=DEFAULT_THRESHOLD,
-        metavar="SIGMA",
-        help=f"outlier threshold in robust sigmas; 0 disables highlighting "
-        f"(default: {DEFAULT_THRESHOLD:g})",
+        metavar="PERCENT",
+        help=f"highlight values deviating more than this percentage from the column "
+        f"median; 0 disables highlighting (default: {DEFAULT_THRESHOLD:g})",
     )
     parser.add_argument(
         "-m",
