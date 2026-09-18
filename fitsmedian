@@ -16,7 +16,12 @@ FITS_EXT = {".fit", ".fits", ".fts"}
 XISF_EXT = {".xisf"}
 DEFAULT_AREA = 10.0
 DEFAULT_SAMPLES = 100_000
+DEFAULT_THRESHOLD = 3.0
 REGIONS = ["CENTER", "TL", "TR", "BL", "BR"]
+COLUMNS = REGIONS + ["SUM"]
+MAD_TO_SIGMA = 1.4826
+HIGHLIGHT = "\033[1;31m"
+RESET = "\033[0m"
 
 FITS_CODES = {8: "B", 16: "h", 32: "i", 64: "q", -32: "f", -64: "d"}
 XISF_CODES = {
@@ -232,18 +237,34 @@ def format_value(value: float) -> str:
     return str(int(value)) if float(value).is_integer() else f"{value:.4f}"
 
 
+def outlier_flags(values: list[float], threshold: float) -> list[bool]:
+    """Flag values further than `threshold` robust sigmas from the column median."""
+    if len(values) < 3 or threshold <= 0:
+        return [False] * len(values)
+    middle = statistics.median(values)
+    sigma = MAD_TO_SIGMA * statistics.median([abs(v - middle) for v in values])
+    if sigma <= 0:
+        return [False] * len(values)
+    return [abs(v - middle) > threshold * sigma for v in values]
+
+
 def print_table(rows: list[list[str]], headers: list[str], separator: str | None) -> None:
     if separator is not None:
         for row in [headers] + rows:
             print(separator.join(row))
         return
+
+    def plain(text: str) -> str:
+        return text.replace(HIGHLIGHT, "").replace(RESET, "")
+
     widths = [len(h) for h in headers]
     for row in rows:
-        widths = [max(w, len(c)) for w, c in zip(widths, row)]
+        widths = [max(w, len(plain(c))) for w, c in zip(widths, row)]
     print("  ".join(h.ljust(w) for h, w in zip(headers, widths)).rstrip())
     print("  ".join("-" * w for w in widths).rstrip())
     for row in rows:
-        print("  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip())
+        cells = [c + " " * (w - len(plain(c))) for c, w in zip(row, widths)]
+        print("  ".join(cells).rstrip())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -264,9 +285,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "-s",
         "--sort",
-        choices=REGIONS,
-        default="CENTER",
-        help="region used to sort the results (default: CENTER)",
+        choices=COLUMNS,
+        default="SUM",
+        help="column used to sort the results (default: SUM)",
+    )
+    parser.add_argument(
+        "-t",
+        "--threshold",
+        type=float,
+        default=DEFAULT_THRESHOLD,
+        metavar="SIGMA",
+        help=f"outlier threshold in robust sigmas; 0 disables highlighting "
+        f"(default: {DEFAULT_THRESHOLD:g})",
     )
     parser.add_argument(
         "-m",
@@ -306,7 +336,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"fitsmedian: no FITS/XISF files found in {args.path}", file=sys.stderr)
         return 1
 
-    results: list[tuple[float, str, list[str]]] = []
+    measurements: list[tuple[str, str, str, dict[str, float]]] = []
     failures = 0
     for path in files:
         try:
@@ -317,20 +347,35 @@ def main(argv: list[str] | None = None) -> int:
             print(f"fitsmedian: {path}: {exc}", file=sys.stderr)
             failures += 1
             continue
+        medians["SUM"] = sum(medians[r] for r in REGIONS)
         name = path if args.full_path else os.path.basename(path)
         size = f"{w}x{h}" + (f"/{step}" if step > 1 else "")
-        row = [name, size] + [format_value(medians[r]) for r in REGIONS]
-        results.append((medians[args.sort], path, row))
+        measurements.append((name, size, path, medians))
 
-    results.sort(key=lambda item: item[0], reverse=True)
+    measurements.sort(key=lambda item: item[3][args.sort], reverse=True)
 
-    if results:
-        headers = ["FILE", "SIZE"] + REGIONS
-        print_table([row for _, _, row in results], headers, "," if args.csv else None)
+    if measurements:
+        colorize = not args.csv and sys.stdout.isatty()
+        flags = {
+            column: outlier_flags([m[3][column] for m in measurements], args.threshold)
+            for column in COLUMNS
+        }
+        rows = []
+        for i, (name, size, _, medians) in enumerate(measurements):
+            cells = []
+            for column in COLUMNS:
+                text = format_value(medians[column])
+                if flags[column][i] and not args.csv:
+                    text = f"{HIGHLIGHT}{text}*{RESET}" if colorize else f"{text}*"
+                cells.append(text)
+            rows.append([name, size] + cells)
+
+        headers = ["FILE", "SIZE"] + COLUMNS
+        print_table(rows, headers, "," if args.csv else None)
 
         if not args.no_rm_list:
-            print(f"\n# sorted by {args.sort} median, highest first - review and run manually")
-            for _, path, _ in results:
+            print(f"\n# sorted by {args.sort}, highest first - review and run manually")
+            for _, _, path, _ in measurements:
                 print(f"rm {shlex.quote(path)}")
 
     return 1 if failures else 0
