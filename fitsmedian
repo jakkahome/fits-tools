@@ -233,7 +233,7 @@ def collect_files(target: str, recursive: bool) -> list[str]:
 
 
 def format_value(value: float) -> str:
-    return str(int(value)) if float(value).is_integer() else f"{value:.4f}"
+    return str(round(value))
 
 
 def outlier_flags(values: list[float], threshold: float) -> list[bool]:
