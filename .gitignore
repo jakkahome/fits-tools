@@ -1,0 +1,11 @@
+.DS_Store
+*.part
+
+# Sample/working image data (large binaries)
+files/
+*.fit
+*.fits
+*.FIT
+*.FITS
+*.fts
+*.xisf

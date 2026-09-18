@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+"""Print selected FITS header keywords of FITS/XISF files as a table."""
+
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import struct
+import sys
+import xml.etree.ElementTree as ET
+
+DEFAULT_KEYS = ["GAIN", "OFFSET", "EXPTIME", "INSTRUME"]
+FITS_EXT = {".fit", ".fits", ".fts"}
+XISF_EXT = {".xisf"}
+MISSING = "-"
+
+
+def _clean(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        value = value[1:-1].replace("''", "'").strip()
+    return value
+
+
+def _parse_card(card: str) -> tuple[str, str] | None:
+    key = card[:8].strip()
+    if not key or key in ("COMMENT", "HISTORY", "END") or card[8:10] != "= ":
+        return None
+    field = card[10:]
+    if field.lstrip().startswith("'"):
+        start = field.index("'")
+        i = start + 1
+        while i < len(field):
+            if field[i] == "'":
+                if i + 1 < len(field) and field[i + 1] == "'":
+                    i += 2
+                    continue
+                break
+            i += 1
+        return key, _clean(field[start : i + 1])
+    return key, _clean(field.split("/", 1)[0])
+
+
+def read_fits_header(path: str) -> dict[str, str]:
+    header: dict[str, str] = {}
+    with open(path, "rb") as fh:
+        while True:
+            block = fh.read(2880)
+            if len(block) < 2880:
+                break
+            text = block.decode("latin-1")
+            for offset in range(0, 2880, 80):
+                card = text[offset : offset + 80]
+                if card[:8].strip() == "END":
+                    return header
+                parsed = _parse_card(card)
+                if parsed:
+                    header.setdefault(*parsed)
+    return header
+
+
+def read_xisf_header(path: str) -> dict[str, str]:
+    with open(path, "rb") as fh:
+        signature = fh.read(8)
+        if signature != b"XISF0100":
+            raise ValueError("not an XISF monolithic file")
+        (length,) = struct.unpack("<I", fh.read(4))
+        fh.seek(4, os.SEEK_CUR)  # reserved
+        xml_bytes = fh.read(length)
+
+    root = ET.fromstring(xml_bytes.decode("utf-8", "replace"))
+    header: dict[str, str] = {}
+    for element in root.iter():
+        tag = element.tag.rsplit("}", 1)[-1]
+        if tag == "FITSKeyword":
+            name = (element.get("name") or "").strip().upper()
+            if name:
+                header.setdefault(name, _clean(element.get("value") or ""))
+        elif tag == "Property":
+            name = (element.get("id") or "").strip()
+            if name:
+                value = element.get("value")
+                if value is None:
+                    value = (element.text or "").strip()
+                header.setdefault(name, _clean(value))
+    return header
+
+
+def read_header(path: str) -> dict[str, str]:
+    ext = os.path.splitext(path)[1].lower()
+    if ext in XISF_EXT:
+        return read_xisf_header(path)
+    return read_fits_header(path)
+
+
+def collect_files(target: str, recursive: bool) -> list[str]:
+    if os.path.isfile(target):
+        return [target]
+    if not os.path.isdir(target):
+        raise FileNotFoundError(target)
+
+    known = FITS_EXT | XISF_EXT
+    found: list[str] = []
+    if recursive:
+        for root, _, names in os.walk(target):
+            found += [
+                os.path.join(root, n)
+                for n in names
+                if os.path.splitext(n)[1].lower() in known
+            ]
+    else:
+        found = [
+            os.path.join(target, n)
+            for n in os.listdir(target)
+            if os.path.splitext(n)[1].lower() in known
+            and os.path.isfile(os.path.join(target, n))
+        ]
+    return sorted(found)
+
+
+def lookup(header: dict[str, str], key: str) -> str:
+    if key in header:
+        return header[key] or MISSING
+    upper = key.upper()
+    for name, value in header.items():
+        if name.upper() == upper:
+            return value or MISSING
+    return MISSING
+
+
+def print_table(rows: list[list[str]], headers: list[str], separator: str | None) -> None:
+    if separator is not None:
+        for row in [headers] + rows:
+            print(separator.join(row))
+        return
+
+    widths = [len(h) for h in headers]
+    for row in rows:
+        widths = [max(w, len(cell)) for w, cell in zip(widths, row)]
+    line = "  ".join(h.ljust(w) for h, w in zip(headers, widths)).rstrip()
+    print(line)
+    print("  ".join("-" * w for w in widths).rstrip())
+    for row in rows:
+        print("  ".join(c.ljust(w) for c, w in zip(row, widths)).rstrip())
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="fitsparams",
+        description="Extract FITS/XISF header parameters as a table.",
+    )
+    parser.add_argument("path", help="FITS/XISF file or directory containing them")
+    parser.add_argument(
+        "-p",
+        "--param",
+        action="append",
+        default=[],
+        metavar="KEY",
+        help="extra keyword to show (repeatable or comma-separated)",
+    )
+    parser.add_argument(
+        "-o",
+        "--only",
+        action="store_true",
+        help="show only the keywords given with -p",
+    )
+    parser.add_argument(
+        "-r", "--recursive", action="store_true", help="search directories recursively"
+    )
+    parser.add_argument(
+        "-c", "--csv", action="store_true", help="output comma-separated values"
+    )
+    parser.add_argument(
+        "-f",
+        "--full-path",
+        action="store_true",
+        help="print full paths instead of file names",
+    )
+    args = parser.parse_args(argv)
+
+    extra: list[str] = []
+    for item in args.param:
+        extra += [k.strip() for k in re.split(r"[,\s]+", item) if k.strip()]
+
+    keys = extra[:] if args.only else DEFAULT_KEYS + [
+        k for k in extra if k.upper() not in {d.upper() for d in DEFAULT_KEYS}
+    ]
+    if not keys:
+        parser.error("no keywords requested")
+
+    try:
+        files = collect_files(args.path, args.recursive)
+    except FileNotFoundError:
+        print(f"fitsparams: no such file or directory: {args.path}", file=sys.stderr)
+        return 1
+
+    if not files:
+        print(f"fitsparams: no FITS/XISF files found in {args.path}", file=sys.stderr)
+        return 1
+
+    rows: list[list[str]] = []
+    failures = 0
+    for path in files:
+        name = path if args.full_path else os.path.basename(path)
+        try:
+            header = read_header(path)
+        except Exception as exc:  # unreadable or malformed file
+            print(f"fitsparams: {path}: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        rows.append([name] + [lookup(header, key) for key in keys])
+
+    if rows:
+        print_table(rows, ["FILE"] + keys, "," if args.csv else None)
+
+    return 0 if rows and not failures else (0 if rows else 1)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,0 +1,319 @@
+#!/usr/bin/env python3
+"""Convert FITS images to monolithic XISF files."""
+
+from __future__ import annotations
+
+import argparse
+import datetime
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+XISF_NS = "http://www.pixinsight.com/xisf"
+BLOCK_ALIGNMENT = 4096
+STRUCTURAL_KEYWORDS = {"SIMPLE", "BITPIX", "NAXIS", "EXTEND", "END", "BZERO", "BSCALE"}
+SIGN_FLIP = bytes(i ^ 0x80 for i in range(256))
+FITS_EXT = {".fit", ".fits", ".fts"}
+IMAGE_TYPES = {
+    "bias": "Bias",
+    "dark": "Dark",
+    "flat": "Flat",
+    "light": "Light",
+    "masterbias": "MasterBias",
+    "masterdark": "MasterDark",
+    "masterflat": "MasterFlat",
+    "masterlight": "MasterLight",
+}
+
+
+class FitsError(Exception):
+    pass
+
+
+def _unquote(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        value = value[1:-1].replace("''", "'").strip()
+    return value
+
+
+def _parse_card(card: str) -> tuple[str, str, str] | None:
+    """Return (keyword, raw value as written, comment)."""
+    key = card[:8].strip()
+    if not key or key in ("COMMENT", "HISTORY", "END") or card[8:10] != "= ":
+        return None
+    field = card[10:]
+    if field.lstrip().startswith("'"):
+        start = field.index("'")
+        i = start + 1
+        while i < len(field):
+            if field[i] == "'":
+                if i + 1 < len(field) and field[i + 1] == "'":
+                    i += 2
+                    continue
+                break
+            i += 1
+        value = field[start : i + 1].strip()
+        rest = field[i + 1 :]
+    else:
+        value, _, rest = field.partition("/")
+        value = value.strip()
+        rest = "/" + rest if rest else ""
+    comment = rest.split("/", 1)[1].strip() if "/" in rest else ""
+    return key, value, comment
+
+
+def read_primary_header(fh) -> tuple[list[tuple[str, str, str]], int]:
+    """Return the primary HDU cards and the byte offset of its data."""
+    cards: list[tuple[str, str, str]] = []
+    while True:
+        block = fh.read(2880)
+        if len(block) < 2880:
+            raise FitsError("truncated header")
+        text = block.decode("latin-1")
+        for offset in range(0, 2880, 80):
+            card = text[offset : offset + 80]
+            if card[:8].strip() == "END":
+                return cards, fh.tell()
+            parsed = _parse_card(card)
+            if parsed:
+                cards.append(parsed)
+
+
+def _number(cards: dict[str, str], key: str, default: float | None = None) -> float:
+    if key not in cards:
+        if default is None:
+            raise FitsError(f"missing required keyword {key}")
+        return default
+    try:
+        return float(_unquote(cards[key]))
+    except ValueError as exc:
+        raise FitsError(f"invalid value for {key}: {cards[key]}") from exc
+
+
+def sample_format(bitpix: int, bzero: float) -> tuple[str, int, bool]:
+    """Return (XISF sample format, bytes per sample, needs unsigned offset)."""
+    if bitpix == 8 and bzero == 0:
+        return "UInt8", 1, False
+    if bitpix == 16 and bzero == 32768:
+        return "UInt16", 2, True
+    if bitpix == 32 and bzero == 2147483648:
+        return "UInt32", 4, True
+    if bitpix == -32 and bzero == 0:
+        return "Float32", 4, False
+    if bitpix == -64 and bzero == 0:
+        return "Float64", 8, False
+    raise FitsError(f"unsupported BITPIX={bitpix} with BZERO={bzero:g}")
+
+
+def repack(data: bytes, itemsize: int, unsigned_offset: bool) -> bytes:
+    """Convert big-endian FITS samples to little-endian XISF samples."""
+    if itemsize == 1:
+        return data
+    out = bytearray(len(data))
+    for i in range(itemsize):
+        chunk = data[i::itemsize]
+        if i == 0 and unsigned_offset:
+            chunk = chunk.translate(SIGN_FLIP)
+        out[itemsize - 1 - i :: itemsize] = chunk
+    return bytes(out)
+
+
+def build_header(
+    cards: list[tuple[str, str, str]],
+    geometry: tuple[int, int, int],
+    fmt: str,
+    position: int,
+    size: int,
+) -> bytes:
+    width, height, channels = geometry
+    lookup = {k: v for k, v, _ in cards}
+
+    root = ET.Element(
+        "xisf",
+        {
+            "version": "1.0",
+            "xmlns": XISF_NS,
+            "xmlns:xsi": "http://www.w3.org/2001/XMLSchema-instance",
+            "xsi:schemaLocation": f"{XISF_NS} http://pixinsight.com/xisf/xisf-1.0.xsd",
+        },
+    )
+    attributes = {
+        "geometry": f"{width}:{height}:{channels}",
+        "sampleFormat": fmt,
+        "colorSpace": "RGB" if channels == 3 else "Gray",
+        "location": f"attachment:{position}:{size}",
+    }
+    if fmt.startswith("Float"):
+        attributes["bounds"] = "0:1"
+    image_type = IMAGE_TYPES.get(
+        _unquote(lookup.get("IMAGETYP", "")).lower().replace(" frame", "").replace(" ", "")
+    )
+    if image_type:
+        attributes["imageType"] = image_type
+    image = ET.SubElement(root, "Image", attributes)
+
+    for key, value, comment in cards:
+        if key in STRUCTURAL_KEYWORDS or key.startswith("NAXIS"):
+            continue
+        ET.SubElement(
+            image, "FITSKeyword", {"name": key, "value": value, "comment": comment}
+        )
+
+    metadata = ET.SubElement(root, "Metadata")
+    ET.SubElement(
+        metadata,
+        "Property",
+        {
+            "id": "XISF:CreationTime",
+            "type": "TimePoint",
+            "value": datetime.datetime.now(datetime.timezone.utc)
+            .replace(tzinfo=None)
+            .isoformat(timespec="milliseconds")
+            + "Z",
+        },
+    )
+    creator = ET.SubElement(
+        metadata, "Property", {"id": "XISF:CreatorApplication", "type": "String"}
+    )
+    creator.text = "fits2xisf"
+
+    xml = b'<?xml version="1.0" encoding="UTF-8"?>\n' + ET.tostring(root, encoding="utf-8")
+    return xml
+
+
+def convert(src: str, dst: str, flip: bool) -> None:
+    with open(src, "rb") as fh:
+        if fh.read(6) != b"SIMPLE":
+            raise FitsError("not a FITS file")
+        fh.seek(0)
+        cards, data_start = read_primary_header(fh)
+        lookup = {k: v for k, v, _ in cards}
+
+        naxis = int(_number(lookup, "NAXIS"))
+        if naxis not in (2, 3):
+            raise FitsError(f"unsupported NAXIS={naxis} (only 2D and 3D images)")
+        width = int(_number(lookup, "NAXIS1"))
+        height = int(_number(lookup, "NAXIS2"))
+        channels = int(_number(lookup, "NAXIS3", 1)) if naxis == 3 else 1
+        if channels not in (1, 3):
+            raise FitsError(f"unsupported channel count {channels}")
+        if _number(lookup, "BSCALE", 1) != 1:
+            raise FitsError("BSCALE != 1 is not supported")
+
+        bitpix = int(_number(lookup, "BITPIX"))
+        fmt, itemsize, offset = sample_format(bitpix, _number(lookup, "BZERO", 0))
+
+        row_bytes = width * itemsize
+        data_size = row_bytes * height * channels
+        if os.path.getsize(src) - data_start < data_size:
+            raise FitsError("truncated image data")
+
+        geometry = (width, height, channels)
+        position = BLOCK_ALIGNMENT
+        for _ in range(4):
+            xml = build_header(cards, geometry, fmt, position, data_size)
+            aligned = -(-(16 + len(xml)) // BLOCK_ALIGNMENT) * BLOCK_ALIGNMENT
+            if aligned == position:
+                break
+            position = aligned
+        else:
+            raise FitsError("could not lay out XISF header")
+
+        tmp = dst + ".part"
+        with open(tmp, "wb") as out:
+            out.write(b"XISF0100")
+            out.write(len(xml).to_bytes(4, "little"))
+            out.write(b"\x00\x00\x00\x00")
+            out.write(xml)
+            out.write(b"\x00" * (position - out.tell()))
+            for channel in range(channels):
+                rows = range(height - 1, -1, -1) if flip else range(height)
+                for row in rows:
+                    fh.seek(data_start + (channel * height + row) * row_bytes)
+                    out.write(repack(fh.read(row_bytes), itemsize, offset))
+    os.replace(tmp, dst)
+
+
+def collect_files(target: str, recursive: bool) -> list[str]:
+    if os.path.isfile(target):
+        return [target]
+    if not os.path.isdir(target):
+        raise FileNotFoundError(target)
+    found: list[str] = []
+    if recursive:
+        for root, _, names in os.walk(target):
+            found += [
+                os.path.join(root, n)
+                for n in names
+                if os.path.splitext(n)[1].lower() in FITS_EXT
+            ]
+    else:
+        found = [
+            os.path.join(target, n)
+            for n in os.listdir(target)
+            if os.path.splitext(n)[1].lower() in FITS_EXT
+            and os.path.isfile(os.path.join(target, n))
+        ]
+    return sorted(found)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="fits2xisf", description="Convert FITS images to XISF."
+    )
+    parser.add_argument("path", help="FITS file or directory containing FITS files")
+    parser.add_argument(
+        "-o", "--output", metavar="DIR", help="output directory (default: next to source)"
+    )
+    parser.add_argument(
+        "-r", "--recursive", action="store_true", help="search directories recursively"
+    )
+    parser.add_argument(
+        "-y", "--overwrite", action="store_true", help="overwrite existing XISF files"
+    )
+    parser.add_argument(
+        "--flip",
+        action="store_true",
+        help="flip rows vertically (bottom-up FITS convention)",
+    )
+    parser.add_argument("-q", "--quiet", action="store_true", help="suppress progress output")
+    args = parser.parse_args(argv)
+
+    try:
+        files = collect_files(args.path, args.recursive)
+    except FileNotFoundError:
+        print(f"fits2xisf: no such file or directory: {args.path}", file=sys.stderr)
+        return 1
+
+    if not files:
+        print(f"fits2xisf: no FITS files found in {args.path}", file=sys.stderr)
+        return 1
+
+    if args.output:
+        os.makedirs(args.output, exist_ok=True)
+
+    failures = 0
+    for src in files:
+        directory = args.output or os.path.dirname(src) or "."
+        dst = os.path.join(
+            directory, os.path.splitext(os.path.basename(src))[0] + ".xisf"
+        )
+        if os.path.exists(dst) and not args.overwrite:
+            print(f"fits2xisf: {dst} exists (use -y to overwrite)", file=sys.stderr)
+            failures += 1
+            continue
+        try:
+            convert(src, dst, args.flip)
+        except (FitsError, OSError) as exc:
+            print(f"fits2xisf: {src}: {exc}", file=sys.stderr)
+            failures += 1
+            continue
+        if not args.quiet:
+            print(f"{src} -> {dst}")
+
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
