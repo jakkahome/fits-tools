@@ -14,7 +14,7 @@ import xml.etree.ElementTree as ET
 
 FITS_EXT = {".fit", ".fits", ".fts"}
 XISF_EXT = {".xisf"}
-DEFAULT_AREA = 5.0
+DEFAULT_AREA = 10.0
 DEFAULT_SAMPLES = 100_000
 REGIONS = ["CENTER", "TL", "TR", "BL", "BR"]
 
@@ -60,11 +60,20 @@ class Image:
         plane = self.offset + channel * self.height * row_bytes
         values: list[float] = []
         for row in range(y0, y0 + h, step):
-            fh.seek(plane + row * row_bytes + x0 * self.itemsize)
-            data = fh.read(w * self.itemsize)
-            if len(data) < w * self.itemsize:
-                raise ImageError("truncated image data")
-            values.extend(unpack(data)[::step])
+            # whole 2x2 blocks keep CFA (Bayer) images sampled in their native proportions
+            for line in (row, row + 1) if step > 1 else (row,):
+                if line >= y0 + h:
+                    break
+                fh.seek(plane + line * row_bytes + x0 * self.itemsize)
+                data = fh.read(w * self.itemsize)
+                if len(data) < w * self.itemsize:
+                    raise ImageError("truncated image data")
+                samples = unpack(data)
+                if step > 1:
+                    values.extend(samples[0::step])
+                    values.extend(samples[1::step])
+                else:
+                    values.extend(samples)
         if self.bzero or self.bscale != 1:
             values = [self.bzero + self.bscale * v for v in values]
         return values
@@ -178,11 +187,12 @@ def region_medians(
         w = max(1, round(image.width * scale))
         h = max(1, round(image.height * scale))
         pixels = w * h * image.channels
-        step = 1 if max_samples <= 0 else max(1, math.isqrt(pixels // max(1, max_samples)))
-        right = image.width - w
-        bottom = image.height - h
+        blocks = 1 if max_samples <= 0 else max(1, math.isqrt(pixels // max(1, max_samples)))
+        step = 1 if blocks == 1 else 2 * blocks
+        right = (image.width - w) & ~1  # even origins keep CFA blocks aligned
+        bottom = (image.height - h) & ~1
         origins = {
-            "CENTER": (right // 2, bottom // 2),
+            "CENTER": (right // 2 & ~1, bottom // 2 & ~1),
             "TL": (0, 0),
             "TR": (right, 0),
             "BL": (0, bottom),
@@ -248,7 +258,8 @@ def main(argv: list[str] | None = None) -> int:
         type=float,
         default=DEFAULT_AREA,
         metavar="PERCENT",
-        help=f"percentage of the image area per region (default: {DEFAULT_AREA:g})",
+        help=f"total percentage of the image area to sample, split evenly between "
+        f"the {len(REGIONS)} regions (default: {DEFAULT_AREA:g})",
     )
     parser.add_argument(
         "-s",
@@ -300,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
     for path in files:
         try:
             medians, (w, h), step = region_medians(
-                path, args.area / 100.0, args.max_samples
+                path, args.area / 100.0 / len(REGIONS), args.max_samples
             )
         except (ImageError, OSError, struct.error) as exc:
             print(f"fitsmedian: {path}: {exc}", file=sys.stderr)
