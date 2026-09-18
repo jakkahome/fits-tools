@@ -77,8 +77,9 @@ Details:
 ## `fitsmedian`
 
 Measures median pixel values in five regions — the centre and the four corners — each
-covering 5 % of the image area by default. Useful for checking sky background level,
-vignetting and gradients across a set of frames.
+covering 5 % of the image area by default. It is mostly useful for quickly spotting
+outlier frames: clouds, moonlight, satellite glare, light leaks and similar anomalies
+show up as unusually high medians.
 
 ```sh
 fitsmedian /path/to/file.fit
