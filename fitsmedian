@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 FITS_EXT = {".fit", ".fits", ".fts"}
 XISF_EXT = {".xisf"}
 DEFAULT_AREA = 5.0
+DEFAULT_SAMPLES = 100_000
 REGIONS = ["CENTER", "TL", "TR", "BL", "BR"]
 
 FITS_CODES = {8: "B", 16: "h", 32: "i", 64: "q", -32: "f", -64: "d"}
@@ -50,18 +51,20 @@ class Image:
         self.bscale = bscale
         self.itemsize = struct.calcsize(code)
 
-    def read_region(self, fh, channel: int, x0: int, y0: int, w: int, h: int) -> list[float]:
+    def read_region(
+        self, fh, channel: int, x0: int, y0: int, w: int, h: int, step: int = 1
+    ) -> list[float]:
         prefix = ">" if self.byteorder == "big" else "<"
         unpack = struct.Struct(f"{prefix}{w}{self.code}").unpack
         row_bytes = self.width * self.itemsize
         plane = self.offset + channel * self.height * row_bytes
         values: list[float] = []
-        for row in range(y0, y0 + h):
+        for row in range(y0, y0 + h, step):
             fh.seek(plane + row * row_bytes + x0 * self.itemsize)
             data = fh.read(w * self.itemsize)
             if len(data) < w * self.itemsize:
                 raise ImageError("truncated image data")
-            values.extend(unpack(data))
+            values.extend(unpack(data)[::step])
         if self.bzero or self.bscale != 1:
             values = [self.bzero + self.bscale * v for v in values]
         return values
@@ -164,7 +167,9 @@ def open_xisf(path: str, fh) -> Image:
     )
 
 
-def region_medians(path: str, fraction: float) -> tuple[dict[str, float], tuple[int, int]]:
+def region_medians(
+    path: str, fraction: float, max_samples: int
+) -> tuple[dict[str, float], tuple[int, int], int]:
     """Median of each sampled region, pooled over all channels."""
     opener = open_xisf if os.path.splitext(path)[1].lower() in XISF_EXT else open_fits
     with open(path, "rb") as fh:
@@ -172,6 +177,8 @@ def region_medians(path: str, fraction: float) -> tuple[dict[str, float], tuple[
         scale = math.sqrt(fraction)
         w = max(1, round(image.width * scale))
         h = max(1, round(image.height * scale))
+        pixels = w * h * image.channels
+        step = 1 if max_samples <= 0 else max(1, math.isqrt(pixels // max(1, max_samples)))
         right = image.width - w
         bottom = image.height - h
         origins = {
@@ -185,9 +192,9 @@ def region_medians(path: str, fraction: float) -> tuple[dict[str, float], tuple[
         for region, (x0, y0) in origins.items():
             values: list[float] = []
             for channel in range(image.channels):
-                values += image.read_region(fh, channel, x0, y0, w, h)
+                values += image.read_region(fh, channel, x0, y0, w, h, step)
             medians[region] = statistics.median(values)
-    return medians, (w, h)
+    return medians, (w, h), step
 
 
 def collect_files(target: str, recursive: bool) -> list[str]:
@@ -251,6 +258,15 @@ def main(argv: list[str] | None = None) -> int:
         help="region used to sort the results (default: CENTER)",
     )
     parser.add_argument(
+        "-m",
+        "--max-samples",
+        type=int,
+        default=DEFAULT_SAMPLES,
+        metavar="N",
+        help=f"approximate pixels read per region; 0 reads every pixel "
+        f"(default: {DEFAULT_SAMPLES})",
+    )
+    parser.add_argument(
         "-r", "--recursive", action="store_true", help="search directories recursively"
     )
     parser.add_argument(
@@ -283,13 +299,16 @@ def main(argv: list[str] | None = None) -> int:
     failures = 0
     for path in files:
         try:
-            medians, (w, h) = region_medians(path, args.area / 100.0)
+            medians, (w, h), step = region_medians(
+                path, args.area / 100.0, args.max_samples
+            )
         except (ImageError, OSError, struct.error) as exc:
             print(f"fitsmedian: {path}: {exc}", file=sys.stderr)
             failures += 1
             continue
         name = path if args.full_path else os.path.basename(path)
-        row = [name, f"{w}x{h}"] + [format_value(medians[r]) for r in REGIONS]
+        size = f"{w}x{h}" + (f"/{step}" if step > 1 else "")
+        row = [name, size] + [format_value(medians[r]) for r in REGIONS]
         results.append((medians[args.sort], path, row))
 
     results.sort(key=lambda item: item[0], reverse=True)

@@ -91,6 +91,7 @@ fitsmedian /path/to/directory -a 10 -s TL
 | --- | --- |
 | `-a, --area PERCENT` | Percentage of the image area per region (default: 5). |
 | `-s, --sort REGION` | Region used for sorting: `CENTER`, `TL`, `TR`, `BL`, `BR` (default: `CENTER`). |
+| `-m, --max-samples N` | Approximate pixels read per region; `0` reads every pixel (default: 100000). |
 | `-r, --recursive` | Search directories recursively. |
 | `-c, --csv` | Output comma-separated values instead of an aligned table. |
 | `-f, --full-path` | Print full paths instead of file names. |
@@ -100,6 +101,7 @@ Results are sorted from the highest median to the lowest, and a matching list of
 `rm <file>` commands is printed below the table so you can copy the lines for the frames
 you want to delete. The script never deletes anything itself.
 
-The `SIZE` column shows the size of each sampled region in pixels. For colour images all
-channels are pooled into one median per region. FITS values are scaled with
-`BZERO`/`BSCALE`; compressed XISF data blocks are not supported.
+The `SIZE` column shows the size of each sampled region in pixels, followed by `/N` when
+the region is subsampled every `N`th pixel for speed. For colour images all channels are
+pooled into one median per region. FITS values are scaled with `BZERO`/`BSCALE`;
+compressed XISF data blocks are not supported.
